@@ -225,9 +225,15 @@ class metaworld_wrapper():
                                  reward=time_step['reward'],
                                  discount=1.0,
                                 success = time_step['success'])
+    
+    def render(self):
+        # Get the latest observation image from the stacked observations
+        # Take the last 3 channels which correspond to the most recent frame
+        latest_frame = self.stackedobs[..., -3:]
+        return latest_frame
 
 def make(name, frame_stack, action_repeat, seed):
-    env = MetaWorld(name, seed,action_repeat, (84,84), 'corner2')
+    env = MetaWorld(name, seed,action_repeat, (256,256), 'corner2')
     env = NormalizeAction(env)
     env = TimeLimit(env, 250)
     env = metaworld_wrapper(env, frame_stack)

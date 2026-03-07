@@ -5,7 +5,6 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 import os
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-os.environ['MUJOCO_GL'] = 'egl'
 
 from pathlib import Path
 
@@ -15,7 +14,7 @@ import utils
 import torch
 from dm_env import specs
 
-import metaworld_env as mw
+import piper.env as piper_env
 
 from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
@@ -76,16 +75,26 @@ class Workspace:
         self._global_episode = 0
 
     def setup(self):
-        # create logger
         self.logger = Logger(self.work_dir,
                              use_tb=self.cfg.use_tb,
                              use_wandb=self.cfg.use_wandb)
-        # create envs
-        self.train_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed)
-        self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed)
-        # create replay buffer
+        
+        use_sim = getattr(self.cfg, 'use_sim', True)
+        self.train_env = piper_env.make(
+            self.cfg.task_name, 
+            self.cfg.frame_stack,
+            self.cfg.action_repeat, 
+            self.cfg.seed,
+            use_sim=use_sim
+        )
+        self.eval_env = piper_env.make(
+            self.cfg.task_name, 
+            self.cfg.frame_stack,
+            self.cfg.action_repeat, 
+            self.cfg.seed,
+            use_sim=use_sim
+        )
+        
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
                       specs.Array((1, ), np.float32, 'reward'),
@@ -135,7 +144,6 @@ class Workspace:
                           math.exp(-self.global_step / self._nstep_alpha_temp))
 
     def update_buffer(self):
-        #self.buffer.update_discount(self.discount)
         self.buffer.update_nstep(self.nstep)
         return
     
@@ -147,7 +155,6 @@ class Workspace:
             episode_sr = False
             time_step = self.eval_env.reset()
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
-            # self.video_recorder.init(self.eval_env, enabled=False)
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
@@ -170,8 +177,6 @@ class Workspace:
             log('step', self.global_step)
 
     def train(self):
-        # predicates 
-        # frames = steps * action_repeat
         train_until_step = utils.Until(self.cfg.num_train_frames,
                                        self.cfg.action_repeat)
         seed_until_step = utils.Until(self.cfg.num_seed_frames,
@@ -187,9 +192,7 @@ class Workspace:
         while train_until_step(self.global_step):
             if time_step.last():
                 self._global_episode += 1
-                # wait until all the metrics schema is populated
                 if metrics is not None:
-                    # log stats
                     elapsed_time, total_time = self.timer.reset()
                     episode_frame = episode_step * self.cfg.action_repeat
                     with self.logger.log_and_dump_ctx(self.global_frame,
@@ -202,7 +205,6 @@ class Workspace:
                         log('episode', self.global_episode)
                         log('buffer_size', len(self.replay_storage))
                         log('step', self.global_step)
-                # update priority queue
                 if hasattr(self.agent, 'tp_set'):
                     self.agent.tp_set.add(episode_reward,\
                                             deepcopy(self.agent.actor),\
@@ -211,7 +213,6 @@ class Workspace:
                                             deepcopy(self.agent.value_predictor),\
                                             moe=deepcopy(self.agent.actor.moe.experts),\
                                             gate=deepcopy(self.agent.actor.moe.gate))                    
-                # reset env
                 time_step = self.train_env.reset()
                 self.replay_storage.add(time_step)
                 if self.cfg.save_snapshot and self.global_step - self.last_save_step >= self.cfg.save_interval:
@@ -221,19 +222,16 @@ class Workspace:
                 episode_step = 0
                 episode_reward = 0
 
-            # try to evaluate
             if eval_every_step(self.global_step):
                 self.logger.log('eval_total_time', self.timer.total_time(),
                                 self.global_frame)
                 self.eval()
 
-            # sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation,
                                         self.global_step,
                                         eval_mode=False)
 
-            # try to update the agent
             if not seed_until_step(self.global_step) and self.global_step % self.cfg.update_every_steps == 0:   
                 metrics = self.agent.update(
                     self.replay_iter, self.global_step
@@ -242,7 +240,6 @@ class Workspace:
                     metrics = self.agent.tp_set.log(metrics)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
-            # take env step
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step)
@@ -276,13 +273,12 @@ class Workspace:
             self.__dict__[k] = v
 
 
-@hydra.main(config_path='cfgs', config_name='config')
+@hydra.main(config_path='piper/cfgs', config_name='config')
 def main(cfgs):
-    from train_mw import Workspace as W
+    from train_piper import Workspace as W
     root_dir = Path.cwd()
     workspace = W(cfgs)
     
-    # 检查是否有直接指定的模型路径
     snapshot_path = None
     if hasattr(cfgs, 'snapshot_path') and cfgs.snapshot_path:
         snapshot_path = cfgs.snapshot_path
@@ -298,7 +294,6 @@ def main(cfgs):
     else:
         print(f'No snapshot found at {snapshot}')
     
-    # 检查是否只进行评估
     if hasattr(cfgs, 'eval_only') and cfgs.eval_only:
         print('Running evaluation only...')
         workspace.eval()
