@@ -4,7 +4,7 @@ from gym import spaces
 from dm_env import StepType, specs
 from typing import Any, NamedTuple
 from collections import deque
-from piper_robot_with_apriltag import PiperRobotWithAprilTag as PiperRobot
+from piper.robot import PiperRobot
 
 
 class NormalizeAction:
