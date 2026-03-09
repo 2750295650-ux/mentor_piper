@@ -121,7 +121,7 @@ class PiperEnv:
         )
         self.action_space = spaces.Box(
             low=-1, high=1, 
-            shape=(6,), 
+            shape=(7,), 
             dtype=np.float32
         )
         
@@ -202,6 +202,15 @@ class PiperEnv:
         obj_pos = self.robot.get_obj_pos()
         target_pos = self.robot.get_goal_pos()
         
+        # 调试打印
+        print(f"[DEBUG] obj_pos: {obj_pos}, target_pos: {target_pos}")
+        print(f"[DEBUG] aprilag_visible: {self.robot.apriltag_visible}")
+        
+        # AprilTag 丢失惩罚
+        apriltag_penalty = 0.0
+        if not self.robot.apriltag_visible:
+            apriltag_penalty = -2.0
+        
         scale = np.array([2., 2., 1.])
         target_to_obj = (obj_pos - target_pos) * scale
         target_to_obj = np.linalg.norm(target_to_obj)
@@ -219,8 +228,10 @@ class PiperEnv:
         
         tcp_to_obj = np.linalg.norm(obj_pos - tcp_pos)
         
+        # 只取前 6 个关节给 gripper reward 函数
+        gripper_action = action[:6] if len(action) > 6 else action
         object_grasped = self._gripper_caging_reward(
-            action,
+            gripper_action,
             obj_pos,
             tcp_pos,
             object_reach_radius=0.04,
@@ -237,6 +248,9 @@ class PiperEnv:
         obj_to_target = np.linalg.norm(obj_pos - target_pos)
         if obj_to_target < 0.05:
             reward = 10.0
+        
+        # 添加 AprilTag 惩罚
+        reward += apriltag_penalty
         
         success = float(obj_to_target <= 0.07)
         
@@ -282,17 +296,19 @@ class PiperEnv:
         self.step_count = 0
         self._episode_reward = 0.0
         
-        if np.random.random() < 0.3:
-            obj_x = np.random.uniform(-0.1, 0.1)
-            obj_y = np.random.uniform(0.55, 0.65)
-            self.robot.set_obj_pos([obj_x, obj_y, 0.0])
-            
-            goal_x = np.random.uniform(-0.05, 0.05)
-            goal_y = np.random.uniform(0.7, 0.75)
-            while np.linalg.norm([obj_x - goal_x, obj_y - goal_y]) < 0.15:
+        # 只在模拟模式下才随机化目标位置
+        if self.robot.use_sim:
+            if np.random.random() < 0.3:
+                obj_x = np.random.uniform(-0.1, 0.1)
+                obj_y = np.random.uniform(0.55, 0.65)
+                self.robot.set_obj_pos([obj_x, obj_y, 0.0])
+                
                 goal_x = np.random.uniform(-0.05, 0.05)
                 goal_y = np.random.uniform(0.7, 0.75)
-            self.robot.set_goal_pos([goal_x, goal_y, 0.0])
+                while np.linalg.norm([obj_x - goal_x, obj_y - goal_y]) < 0.15:
+                    goal_x = np.random.uniform(-0.05, 0.05)
+                    goal_y = np.random.uniform(0.7, 0.75)
+                self.robot.set_goal_pos([goal_x, goal_y, 0.0])
         
         self.obj_init_pos = self.robot.get_obj_pos().copy()
         

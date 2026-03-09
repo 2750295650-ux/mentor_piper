@@ -40,6 +40,8 @@ class PiperRobot:
         
         self.piper = None
         self.factor = 57295.7795
+        self.gripper_pos = 0
+        self.apriltag_visible = False
         
         if not use_sim and PiperSDK is not None:
             try:
@@ -50,6 +52,7 @@ class PiperRobot:
                 while not self.piper.EnablePiper():
                     time.sleep(0.01)
                 
+                self.piper.GripperCtrl(0, 1000, 0x01, 0)
                 print("✓ 机械臂连接成功并已使能")
             except Exception as e:
                 print(f"警告：无法连接机械臂：{e}，将使用模拟模式")
@@ -209,19 +212,23 @@ class PiperRobot:
             try:
                 joint_pose = self.piper.GetArmJointPoseMsgs()
                 self.current_joint_pos = np.array([
-                    joint_pose.joint_pos.J1,
-                    joint_pose.joint_pos.J2,
-                    joint_pose.joint_pos.J3,
-                    joint_pose.joint_pos.J4,
-                    joint_pose.joint_pos.J5,
-                    joint_pose.joint_pos.J6
+                    joint_pose.joint_pos.J1 / self.factor,
+                    joint_pose.joint_pos.J2 / self.factor,
+                    joint_pose.joint_pos.J3 / self.factor,
+                    joint_pose.joint_pos.J4 / self.factor,
+                    joint_pose.joint_pos.J5 / self.factor,
+                    joint_pose.joint_pos.J6 / self.factor
                 ])
             except Exception as e:
                 print(f"获取关节位置错误：{e}")
         return self.current_joint_pos.copy()
         
-    def set_joint_pos(self, joint_pos, speed=None):
+    def set_joint_pos(self, joint_pos, gripper_pos=None, speed=None):
         joint_pos = np.array(joint_pos)
+        
+        if gripper_pos is not None:
+            self.gripper_pos = gripper_pos
+        
         if not self.use_sim and self.piper is not None:
             try:
                 spd = speed if speed is not None else 100
@@ -233,10 +240,17 @@ class PiperRobot:
                 joint_4 = round(joint_pos[4] * self.factor)
                 joint_5 = round(joint_pos[5] * self.factor)
                 
+                gripper_cmd = round(abs(self.gripper_pos) * 1000 * 1000)
+                
+                print(f"[DEBUG] joint_0-5: {joint_0}, {joint_1}, {joint_2}, {joint_3}, {joint_4}, {joint_5}")
+                print(f"[DEBUG] gripper_cmd: {gripper_cmd}")
+                
                 self.piper.MotionCtrl_2(0x01, 0x01, spd, 0x00)
                 self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
+                self.piper.GripperCtrl(gripper_cmd, 1000, 0x01, 0)
             except Exception as e:
                 print(f"设置关节位置错误：{e}")
+        
         self.current_joint_pos = joint_pos.copy()
         if self.use_sim:
             self._update_end_effector_pos_sim()
@@ -256,9 +270,11 @@ class PiperRobot:
             
     def get_obj_pos(self):
         if self.use_sim:
+            self.apriltag_visible = True
             return self.obj_pos.copy()
         
         # 真实世界：尝试用 AprilTag 检测
+        self.apriltag_visible = False
         if self.use_apriltag and self.apriltag_detector is not None and self.camera is not None:
             try:
                 color_array_rgb, _ = self.camera.get_frame()
@@ -273,6 +289,7 @@ class PiperRobot:
                     )
                     
                     if detections:
+                        self.apriltag_visible = True
                         tag = detections[0]
                         tag_pos_camera = tag.pose_t.flatten()
                         
@@ -302,9 +319,18 @@ class PiperRobot:
         """
         if self.hand_eye_offset is not None:
             # 使用简单手眼标定偏移量
-            # 假设相机坐标系和机械臂坐标系对齐
-            # 只需要加上偏移量
-            robot_pos = camera_pos + self.hand_eye_offset
+            # offset 单位是毫米，转换为米
+            offset_m = self.hand_eye_offset / 1000.0
+            
+            # 先尝试简单的转换，根据 easy_hand_eye_calibration.py 的 offset 计算方式
+            # robot_pos = tag_pos + offset
+            robot_pos = camera_pos + offset_m
+            
+            # 打印用于调试的原始值
+            print(f"[DEBUG] camera_pos (tag_pos): {camera_pos}")
+            print(f"[DEBUG] offset_m: {offset_m}")
+            print(f"[DEBUG] robot_pos: {robot_pos}")
+            
             return robot_pos
         
         if self.T_cam2robot is not None:
@@ -359,7 +385,7 @@ class PiperRobot:
             return np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
             
     def reset(self):
-        self.current_joint_pos = np.zeros(6)
+        self.gripper_pos = 0
         if not hasattr(self, '_initial_obj_pos'):
             self._initial_obj_pos = self.obj_pos.copy()
         if not hasattr(self, '_initial_goal_pos'):
@@ -368,17 +394,23 @@ class PiperRobot:
         self.goal_pos = self._initial_goal_pos.copy()
         
         if not self.use_sim and self.piper is not None:
-            self.set_joint_pos(np.zeros(6))
-            time.sleep(2.0)
+            # 读取机械臂当前的关节位置，而不是强制归零
+            self.get_joint_pos()
+            self.piper.GripperCtrl(0, 1000, 0x01, 0)
+            time.sleep(0.5)
+        else:
+            self.current_joint_pos = np.zeros(6)
             
         if self.use_sim:
             self._update_end_effector_pos_sim()
             
     def step(self, action, dt=0.01):
         action = np.clip(action, -1.0, 1.0)
-        joint_delta = action * 0.1
+        joint_delta = action[:6] * 0.1
         new_joint_pos = self.current_joint_pos + joint_delta
-        self.set_joint_pos(new_joint_pos)
+        # 把 action[6] 从 [-1,1] 映射到 [0,1]
+        new_gripper_pos = (action[6] + 1.0) / 2.0
+        self.set_joint_pos(new_joint_pos, new_gripper_pos)
         
         if self.use_sim:
             self._update_obj_position_sim(action)
