@@ -22,7 +22,7 @@ class NormalizeAction:
         try:
             return getattr(self._env, name)
         except AttributeError:
-            raise ValueError(name)
+            raise AttributeError(name)
 
     @property
     def act_space(self):
@@ -52,7 +52,7 @@ class TimeLimit:
         try:
             return getattr(self._env, name)
         except AttributeError:
-            raise ValueError(name)
+            raise AttributeError(name)
 
     def step(self, action):
         assert self._step is not None, "Must reset environment."
@@ -443,13 +443,13 @@ class PiperWrapper:
         try:
             return getattr(self._env, name)
         except AttributeError:
-            raise ValueError(name)
+            raise AttributeError(name)
 
 
 def make(name, frame_stack, action_repeat, seed, use_sim=True, visualize=False,
          obj_pos=None, goal_pos=None, print_reward=True,
          use_apriltag=False, tag_size=0.05):
-    env = PiperEnv(name, seed, action_repeat, (256, 256), 
+    env = PiperEnv(name, seed, action_repeat, (84, 84), 
                    use_sim=use_sim, visualize=visualize,
                    obj_pos=obj_pos, goal_pos=goal_pos,
                    print_reward=print_reward,

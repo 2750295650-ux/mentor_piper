@@ -105,12 +105,12 @@ class Workspace:
             self.cfg.frame_stack,
             self.cfg.action_repeat, 
             self.cfg.seed,
-            use_sim=use_sim,
-            visualize=visualize,
+            use_sim=True,
+            visualize=False,
             obj_pos=obj_pos,
             goal_pos=goal_pos,
-            print_reward=print_reward,
-            use_apriltag=use_apriltag,
+            print_reward=False,
+            use_apriltag=False,
             tag_size=tag_size
         )
         

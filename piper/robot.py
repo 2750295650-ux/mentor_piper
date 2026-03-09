@@ -5,7 +5,7 @@ import os
 
 try:
     from piper_sdk import *
-    PiperSDK = C_PiperInterface
+    PiperSDK = C_PiperInterface_V2
 except ImportError:
     print("警告：piper_sdk 未安装，将使用模拟模式")
     PiperSDK = None
@@ -39,25 +39,18 @@ class PiperRobot:
         self.tag_size = tag_size
         
         self.piper = None
+        self.factor = 57295.7795
         
         if not use_sim and PiperSDK is not None:
             try:
-                self.piper = PiperSDK(
-                    can_name="can0",
-                    judge_flag=True,
-                    can_auto_init=False,
-                    dh_is_offset=1,
-                    start_sdk_joint_limit=False,
-                    start_sdk_gripper_limit=False,
-                    logger_level=LogLevel.WARNING,
-                    log_to_file=False
-                )
-                
-                self.piper.CreateCanBus(can_name="can0")
+                self.piper = PiperSDK("can0")
                 self.piper.ConnectPort()
-                self.piper.MasterSlaveConfig(0xFC, 0, 0, 0)
-                time.sleep(0.5)
-                print("机械臂连接成功")
+                
+                print("正在使能机械臂...")
+                while not self.piper.EnablePiper():
+                    time.sleep(0.01)
+                
+                print("✓ 机械臂连接成功并已使能")
             except Exception as e:
                 print(f"警告：无法连接机械臂：{e}，将使用模拟模式")
                 self.use_sim = True
@@ -231,18 +224,17 @@ class PiperRobot:
         joint_pos = np.array(joint_pos)
         if not self.use_sim and self.piper is not None:
             try:
-                spd = speed if speed is not None else self.move_spd_rate_ctrl
-                self.piper.MoveJ(
-                    joint_pos[0],
-                    joint_pos[1],
-                    joint_pos[2],
-                    joint_pos[3],
-                    joint_pos[4],
-                    joint_pos[5],
-                    spd,
-                    1,
-                    0
-                )
+                spd = speed if speed is not None else 100
+                
+                joint_0 = round(joint_pos[0] * self.factor)
+                joint_1 = round(joint_pos[1] * self.factor)
+                joint_2 = round(joint_pos[2] * self.factor)
+                joint_3 = round(joint_pos[3] * self.factor)
+                joint_4 = round(joint_pos[4] * self.factor)
+                joint_5 = round(joint_pos[5] * self.factor)
+                
+                self.piper.MotionCtrl_2(0x01, 0x01, spd, 0x00)
+                self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
             except Exception as e:
                 print(f"设置关节位置错误：{e}")
         self.current_joint_pos = joint_pos.copy()
