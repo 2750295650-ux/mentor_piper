@@ -3,6 +3,33 @@ import time
 import cv2
 import os
 
+# ============================================
+# 📌 Piper 机械臂配置区域 - 在这里修改初始位置和限制
+# ============================================
+#
+# 初始位置（关节角度，单位：弧度）
+# 每次环境 reset 时会回到这个位置
+#
+# 注意：如果需要使用示教模式来设置初始位置：
+# 1. 运行 test_piper_camera.py 或使用示教按钮手动移动机械臂
+# 2. 记录下满意的关节角度
+# 3. 将角度转换为弧度（1度 = π/180 弧度）
+# 4. 填入下方的 INITIAL_JOINT_POS
+#
+# ============================================
+
+# 初始关节位置（弧度）- 每次 reset 时回到这个位置
+# 示例：[0.0, 1.57, -1.57, 0.0, 0.0, 0.0] 对应 0°, 90°, -90°, 0°, 0°, 0°
+INITIAL_JOINT_POS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# 最低 Z 轴高度限制（毫米）- 机械臂末端不能低于这个高度
+# 从 test_piper_camera.py 获取：[实时位姿] Z: 109517.00 mm
+MIN_Z_HEIGHT_MM = 109517.0
+
+# ============================================
+# 📌 配置区域结束
+# ============================================
+
 try:
     from piper_sdk import *
     PiperSDK = C_PiperInterface_V2
@@ -272,6 +299,7 @@ class PiperRobot:
                     print(f"[DEBUG] joint_0-5: {joint_0}, {joint_1}, {joint_2}, {joint_3}, {joint_4}, {joint_5}")
                     print(f"[DEBUG] gripper_cmd: {gripper_cmd}")
                 
+                # 先尝试移动到目标位置
                 # 确保机械臂处于 CAN 命令控制模式并使能电机
                 self.piper.ModeCtrl(0x01, 0x01, spd, 0x00)
                 self.piper.EnableArm(7, 0x02)
@@ -280,6 +308,27 @@ class PiperRobot:
                 time.sleep(0.01)  # 等待命令生效
                 self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
                 self.piper.GripperCtrl(gripper_cmd, 1000, 0x01, 0)
+                
+                # 等待移动完成
+                time.sleep(0.3)
+                
+                # 检查 Z 轴高度是否低于最低限制
+                end_pose = self.piper.GetArmEndPoseMsgs()
+                current_z_mm = end_pose.end_pose.Z_axis
+                if current_z_mm < MIN_Z_HEIGHT_MM:
+                    if self.debug_mode:
+                        print(f"[DEBUG] Z 轴高度 {current_z_mm} mm 低于最低限制 {MIN_Z_HEIGHT_MM} mm")
+                        print(f"[DEBUG] 将机械臂回退到初始位置")
+                    # Z 轴太低了，回退到初始位置
+                    self.piper.JointCtrl(
+                        round(INITIAL_JOINT_POS[0] * self.factor),
+                        round(INITIAL_JOINT_POS[1] * self.factor),
+                        round(INITIAL_JOINT_POS[2] * self.factor),
+                        round(INITIAL_JOINT_POS[3] * self.factor),
+                        round(INITIAL_JOINT_POS[4] * self.factor),
+                        round(INITIAL_JOINT_POS[5] * self.factor)
+                    )
+                    time.sleep(0.5)
                 
                 # 获取机械臂状态用于调试（仅在debug_mode下）
                 if self.debug_mode:
@@ -434,12 +483,11 @@ class PiperRobot:
         self.goal_pos = self._initial_goal_pos.copy()
         
         if not self.use_sim and self.piper is not None:
-            # 读取机械臂当前的关节位置，而不是强制归零
-            self.get_joint_pos()
-            self.piper.GripperCtrl(0, 1000, 0x01, 0)
-            time.sleep(0.5)
+            # 使用配置的初始关节位置
+            self.set_joint_pos(INITIAL_JOINT_POS, gripper_pos=0, speed=50)
+            time.sleep(1.0)
         else:
-            self.current_joint_pos = np.zeros(6)
+            self.current_joint_pos = np.array(INITIAL_JOINT_POS).copy()
             
         if self.use_sim:
             self._update_end_effector_pos_sim()

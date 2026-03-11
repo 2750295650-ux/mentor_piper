@@ -43,6 +43,7 @@ else:
 
 try:
     from piper_sdk import *
+    PiperSDK = C_PiperInterface_V2
 except ImportError as e:
     print(f"✗ 无法导入 piper_sdk: {e}")
     sys.exit(1)
@@ -116,12 +117,24 @@ def run_realtime_monitor(robot, intrinsics, pipeline):
     print("=" * 50)
     
     last_pose = None
+    factor = 57295.7795  # 弧度转换因子，与 robot.py 保持一致
     
     try:
         while True:
-            # 获取最新位姿
+            # 获取最新位姿和关节位置
             pose = robot.GetArmEndPoseMsgs()
+            joint_pose = robot.GetArmJointMsgs()
             last_pose = pose
+            
+            # 计算关节角度（弧度）
+            joint_angles = [
+                joint_pose.joint_state.joint_1 / factor,
+                joint_pose.joint_state.joint_2 / factor,
+                joint_pose.joint_state.joint_3 / factor,
+                joint_pose.joint_state.joint_4 / factor,
+                joint_pose.joint_state.joint_5 / factor,
+                joint_pose.joint_state.joint_6 / factor
+            ]
             
             # 格式化输出 (使用 \r 实现单行刷新)
             log_msg = (
@@ -130,7 +143,8 @@ def run_realtime_monitor(robot, intrinsics, pipeline):
                 f"Z: {pose.end_pose.Z_axis:7.2f} mm | "
                 f"RX: {pose.end_pose.RX_axis:6.2f}° | "
                 f"RY: {pose.end_pose.RY_axis:6.2f}° | "
-                f"RZ: {pose.end_pose.RZ_axis:6.2f}°"
+                f"RZ: {pose.end_pose.RZ_axis:6.2f}° | "
+                f"[关节弧度] {joint_angles[0]:.4f}, {joint_angles[1]:.4f}, {joint_angles[2]:.4f}, {joint_angles[3]:.4f}, {joint_angles[4]:.4f}, {joint_angles[5]:.4f}"
             )
             print(log_msg, end='', flush=True)
             
@@ -193,27 +207,27 @@ def main():
         if not camera_data:
             print("⚠️ 相机初始化失败，将仅测试机械臂。")
         
-        # 2. 初始化机械臂
+        # 2. 初始化机械臂（使用 V2 SDK，与 robot.py 保持一致）
         print("\n" + "=" * 50)
         print("连接 Piper 机械臂...")
         print("=" * 50)
         
-        robot = C_PiperInterface(
-            can_name=CAN_DEVICE_NAME,
-            judge_flag=True,
-            can_auto_init=False,
-            dh_is_offset=1,
-            start_sdk_joint_limit=False,
-            start_sdk_gripper_limit=False,
-            logger_level=LogLevel.WARNING,
-            log_to_file=False
-        )
-        
-        # 关键步骤：手动创建 CAN 总线
-        robot.CreateCanBus(can_name=CAN_DEVICE_NAME)
+        robot = PiperSDK(CAN_DEVICE_NAME)
         robot.ConnectPort()
-        robot.MasterSlaveConfig(0xFC, 0, 0, 0)
-        time.sleep(0.5)
+        
+        # 使能机械臂
+        while not robot.EnablePiper():
+            time.sleep(0.01)
+        
+        # 切换到 CAN 命令控制模式并使能电机
+        for _ in range(3):
+            robot.ModeCtrl(0x01, 0x01, 50, 0x00)
+            robot.EnableArm(7, 0x02)
+            time.sleep(0.05)
+        
+        # 清除所有关节错误并配置加速度
+        robot.JointConfig(7, 0x00, 0x00, 500, 0xAE)
+        time.sleep(0.1)
         
         # 验证连接
         test_pose = robot.GetArmEndPoseMsgs()
@@ -225,6 +239,8 @@ def main():
         
     except Exception as e:
         print(f"\n❌ 发生严重错误：{e}")
+        import traceback
+        traceback.print_exc()
         
     finally:
         # 4. 清理资源
