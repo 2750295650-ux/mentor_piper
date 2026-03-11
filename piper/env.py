@@ -214,6 +214,16 @@ class PiperEnv:
         if not self.robot.apriltag_visible:
             apriltag_penalty = -2.0
         
+        # Z轴限制惩罚
+        z_limit_penalty = 0.0
+        if hasattr(self.robot, 'z_limit_triggered') and self.robot.z_limit_triggered:
+            z_limit_penalty = -3.0
+        
+        # 机械臂卡住惩罚
+        stuck_penalty = 0.0
+        if hasattr(self.robot, 'is_stuck') and self.robot.is_stuck():
+            stuck_penalty = -5.0
+        
         scale = np.array([2., 2., 1.])
         target_to_obj = (obj_pos - target_pos) * scale
         target_to_obj = np.linalg.norm(target_to_obj)
@@ -252,8 +262,8 @@ class PiperEnv:
         if obj_to_target < 0.05:
             reward = 10.0
         
-        # 添加 AprilTag 惩罚
-        reward += apriltag_penalty
+        # 添加所有惩罚
+        reward += apriltag_penalty + z_limit_penalty + stuck_penalty
         
         success = float(obj_to_target <= 0.07)
         
@@ -352,11 +362,25 @@ class PiperEnv:
         if self._print_reward:
             tcp_pos = self.robot.get_end_effector_pos()
             obj_pos = self.robot.get_obj_pos()
+            apriltag_info = ""
+            if self.robot.apriltag_visible:
+                apriltag_info = f" | Apriltag: [{obj_pos[0]:.3f}, {obj_pos[1]:.3f}, {obj_pos[2]:.3f}]m"
+            else:
+                apriltag_info = " | Apriltag: ❌"
+            
+            # 添加限制和卡住状态信息
+            limit_info = ""
+            if hasattr(self.robot, 'z_limit_triggered') and self.robot.z_limit_triggered:
+                limit_info += " | Z-Limit: ⚠️"
+            if hasattr(self.robot, 'stuck_counter') and self.robot.stuck_counter > 0:
+                limit_info += f" | Stuck: {self.robot.stuck_counter}"
+            
             print(f"[Step {self.step_count:3d}] "
                   f"Reward: {total_reward:6.2f} | "
                   f"Episode Reward: {self._episode_reward:6.2f} | "
                   f"Obj->Target: {obj_to_target:.4f}m | "
-                  f"Success: {'✅' if success else '❌'}")
+                  f"Success: {'✅' if success else '❌'}"
+                  f"{apriltag_info}{limit_info}")
         
         self._visualize_frame(obs, total_reward, bool(success), self.step_count, 
                              obj_to_target, self._episode_reward)

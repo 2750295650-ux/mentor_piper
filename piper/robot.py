@@ -126,6 +126,12 @@ class PiperRobot:
             
         self.move_spd_rate_ctrl = 50
         
+        # 机械臂卡住检测和限制检测
+        self.last_joint_pos = None
+        self.stuck_counter = 0
+        self.z_limit_triggered = False  # Z轴限制是否被触发
+        self.stuck_threshold = 5  # 连续多少步认为卡住
+        
         # AprilTag 初始化
         self.apriltag_detector = None
         self.camera_params = None
@@ -267,6 +273,9 @@ class PiperRobot:
         if gripper_pos is not None:
             self.gripper_pos = gripper_pos
         
+        # 重置Z轴限制触发标志
+        self.z_limit_triggered = False
+        
         if not self.use_sim and self.piper is not None:
             try:
                 spd = speed if speed is not None else 100
@@ -299,7 +308,6 @@ class PiperRobot:
                     print(f"[DEBUG] joint_0-5: {joint_0}, {joint_1}, {joint_2}, {joint_3}, {joint_4}, {joint_5}")
                     print(f"[DEBUG] gripper_cmd: {gripper_cmd}")
                 
-                # 先尝试移动到目标位置
                 # 确保机械臂处于 CAN 命令控制模式并使能电机
                 self.piper.ModeCtrl(0x01, 0x01, spd, 0x00)
                 self.piper.EnableArm(7, 0x02)
@@ -310,7 +318,7 @@ class PiperRobot:
                 self.piper.GripperCtrl(gripper_cmd, 1000, 0x01, 0)
                 
                 # 等待移动完成
-                time.sleep(0.3)
+                time.sleep(0.1)
                 
                 # 检查 Z 轴高度是否低于最低限制
                 end_pose = self.piper.GetArmEndPoseMsgs()
@@ -318,17 +326,8 @@ class PiperRobot:
                 if current_z_mm < MIN_Z_HEIGHT_MM:
                     if self.debug_mode:
                         print(f"[DEBUG] Z 轴高度 {current_z_mm} mm 低于最低限制 {MIN_Z_HEIGHT_MM} mm")
-                        print(f"[DEBUG] 将机械臂回退到初始位置")
-                    # Z 轴太低了，回退到初始位置
-                    self.piper.JointCtrl(
-                        round(INITIAL_JOINT_POS[0] * self.factor),
-                        round(INITIAL_JOINT_POS[1] * self.factor),
-                        round(INITIAL_JOINT_POS[2] * self.factor),
-                        round(INITIAL_JOINT_POS[3] * self.factor),
-                        round(INITIAL_JOINT_POS[4] * self.factor),
-                        round(INITIAL_JOINT_POS[5] * self.factor)
-                    )
-                    time.sleep(0.5)
+                    # 标记Z轴限制被触发，但不强制回退（避免死机）
+                    self.z_limit_triggered = True
                 
                 # 获取机械臂状态用于调试（仅在debug_mode下）
                 if self.debug_mode:
@@ -475,6 +474,11 @@ class PiperRobot:
             
     def reset(self):
         self.gripper_pos = 0
+        # 重置卡住检测和限制检测状态
+        self.last_joint_pos = None
+        self.stuck_counter = 0
+        self.z_limit_triggered = False
+        
         if not hasattr(self, '_initial_obj_pos'):
             self._initial_obj_pos = self.obj_pos.copy()
         if not hasattr(self, '_initial_goal_pos'):
@@ -492,6 +496,27 @@ class PiperRobot:
         if self.use_sim:
             self._update_end_effector_pos_sim()
             
+    def update_stuck_detection(self):
+        """更新卡住检测状态（仅在step中调用一次）"""
+        if self.last_joint_pos is None:
+            self.last_joint_pos = self.current_joint_pos.copy()
+            return False
+        
+        # 计算关节位置变化
+        joint_change = np.linalg.norm(self.current_joint_pos - self.last_joint_pos)
+        if joint_change < 0.001:  # 关节位置几乎没有变化
+            self.stuck_counter += 1
+        else:
+            self.stuck_counter = 0
+        
+        self.last_joint_pos = self.current_joint_pos.copy()
+        
+        return self.stuck_counter >= self.stuck_threshold
+    
+    def is_stuck(self):
+        """检测机械臂是否卡住（只读，不修改状态）"""
+        return self.stuck_counter >= self.stuck_threshold
+            
     def step(self, action, dt=0.01):
         action = np.clip(action, -1.0, 1.0)
         joint_delta = action[:6] * 0.1
@@ -499,6 +524,9 @@ class PiperRobot:
         # 把 action[6] 从 [-1,1] 映射到 [0,1]
         new_gripper_pos = (action[6] + 1.0) / 2.0
         self.set_joint_pos(new_joint_pos, new_gripper_pos)
+        
+        # 更新卡住检测（每步只调用一次）
+        self.update_stuck_detection()
         
         if self.use_sim:
             self._update_obj_position_sim(action)
