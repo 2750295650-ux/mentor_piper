@@ -5,6 +5,7 @@ import numpy as np
 
 try:
     from piper_sdk import *
+    PiperSDK = C_PiperInterface_V2  # 使用 V2 SDK
 except ImportError:
     print("错误：piper_sdk 未安装！")
     print("请确保 piper_sdk 已正确安装")
@@ -55,24 +56,24 @@ class PositionCalibrator:
         
         # 连接机械臂
         try:
-            self.robot = C_PiperInterface(
-                can_name="can0",
-                judge_flag=True,
-                can_auto_init=False,
-                dh_is_offset=1,
-                start_sdk_joint_limit=False,
-                start_sdk_gripper_limit=False,
-                logger_level=LogLevel.WARNING,
-                log_to_file=False
-            )
-            
-            self.robot.CreateCanBus(can_name="can0")
+            self.robot = PiperSDK("can0")
             self.robot.ConnectPort()
-            self.robot.MasterSlaveConfig(0xFC, 0, 0, 0)
-            time.sleep(0.5)
+            
+            while not self.robot.EnablePiper():
+                time.sleep(0.01)
+            
+            self.robot.GripperCtrl(0, 1000, 0x01, 0)
+            # 多次调用确保模式切换成功
+            for _ in range(3):
+                self.robot.ModeCtrl(0x01, 0x01, 30, 0x00)
+                self.robot.EnableArm(7, 0x02)
+                time.sleep(0.05)
+            # 清除所有关节错误并配置加速度
+            self.robot.JointConfig(7, 0x00, 0x00, 500, 0xAE)
+            time.sleep(0.1)
             print("✓ 机械臂连接成功")
         except Exception as e:
-            print(f"✗ 机械臂连接失败: {e}")
+            print(f"✗ 机械臂连接失败：{e}")
             return False
         
         # 连接摄像头（如果需要 AprilTag）
