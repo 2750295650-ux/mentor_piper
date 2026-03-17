@@ -131,6 +131,7 @@ class PiperEnv:
         self.obj_init_pos = np.array([0.0, 0.6, 0.0])
         self._episode_reward = 0.0
         self._window_name = "Piper Training Camera"
+        self._manual_reward = 0.0  # 手动奖励
     
     def _visualize_frame(self, obs, reward, success, step_count, obj_to_target=None, episode_reward=None):
         if not self._visualize:
@@ -168,6 +169,10 @@ class PiperEnv:
             
             cv2.putText(display_img, "Press 'q' to close (training continues)", (10, y_pos),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+            y_pos += line_spacing
+            
+            cv2.putText(display_img, "Press SPACE for +reward", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             cv2.imshow(self._window_name, display_img)
             
@@ -179,6 +184,9 @@ class PiperEnv:
                     cv2.destroyWindow(self._window_name)
                 except:
                     pass
+            elif key == ord(' '):  # 空格键
+                self._manual_reward += 10.0  # 按空格键增加 5 点奖励
+                print(f"\n[手动奖励] +10.0 (当前累积：{self._manual_reward:.1f})")
                     
         except Exception as e:
             print(f"可视化错误: {e}")
@@ -209,20 +217,20 @@ class PiperEnv:
             print(f"[DEBUG] obj_pos: {obj_pos}, target_pos: {target_pos}")
             print(f"[DEBUG] aprilag_visible: {self.robot.apriltag_visible}")
         
-        # AprilTag 丢失惩罚
+        # AprilTag 丢失惩罚（已放宽）
         apriltag_penalty = 0.0
         if not self.robot.apriltag_visible:
-            apriltag_penalty = -2.0
+            apriltag_penalty = -0.5
         
-        # Z轴限制惩罚
-        z_limit_penalty = 0.0
-        if hasattr(self.robot, 'z_limit_triggered') and self.robot.z_limit_triggered:
-            z_limit_penalty = -3.0
+        # 位置限制惩罚
+        position_limit_penalty = 0.0
+        if hasattr(self.robot, 'position_limit_violated') and self.robot.position_limit_violated:
+            position_limit_penalty = -3.0
         
-        # 机械臂卡住惩罚
+        # 机械臂卡住惩罚（已放宽）
         stuck_penalty = 0.0
         if hasattr(self.robot, 'is_stuck') and self.robot.is_stuck():
-            stuck_penalty = -5.0
+            stuck_penalty = -2.0
         
         scale = np.array([2., 2., 1.])
         target_to_obj = (obj_pos - target_pos) * scale
@@ -263,7 +271,12 @@ class PiperEnv:
             reward = 10.0
         
         # 添加所有惩罚
-        reward += apriltag_penalty + z_limit_penalty + stuck_penalty
+        reward += apriltag_penalty + position_limit_penalty + stuck_penalty
+        
+        # 添加手动奖励
+        reward += self._manual_reward
+        if self._manual_reward > 0:
+            self._manual_reward = 0  # 重置手动奖励
         
         success = float(obj_to_target <= 0.07)
         
@@ -308,6 +321,7 @@ class PiperEnv:
         self.robot.reset()
         self.step_count = 0
         self._episode_reward = 0.0
+        self._manual_reward = 0.0  # 重置手动奖励
         
         # 只在模拟模式下才随机化目标位置
         if self.robot.use_sim:
@@ -370,8 +384,8 @@ class PiperEnv:
             
             # 添加限制和卡住状态信息
             limit_info = ""
-            if hasattr(self.robot, 'z_limit_triggered') and self.robot.z_limit_triggered:
-                limit_info += " | Z-Limit: ⚠️"
+            if hasattr(self.robot, 'position_limit_violated') and self.robot.position_limit_violated:
+                limit_info += " | Limit: ⚠️"
             if hasattr(self.robot, 'stuck_counter') and self.robot.stuck_counter > 0:
                 limit_info += f" | Stuck: {self.robot.stuck_counter}"
             

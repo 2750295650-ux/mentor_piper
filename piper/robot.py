@@ -20,11 +20,25 @@ import os
 
 # 初始关节位置（弧度）- 每次 reset 时回到这个位置
 # 示例：[0.0, 1.57, -1.57, 0.0, 0.0, 0.0] 对应 0°, 90°, -90°, 0°, 0°, 0°
-INITIAL_JOINT_POS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+INITIAL_JOINT_POS = [0.0116, 0.7366, -0.4097, -0.0418, 0.4053, -0.1915]
 
-# 最低 Z 轴高度限制（毫米）- 机械臂末端不能低于这个高度
-# 从 test_piper_camera.py 获取：[实时位姿] Z: 109517.00 mm
-MIN_Z_HEIGHT_MM = 109517.0
+# ============================================
+# 机械臂末端位置限制（毫米）
+# 如果需要启用限制，设置 ENABLE_POSITION_LIMITS = True
+# ============================================
+ENABLE_POSITION_LIMITS = True
+
+# X 轴限制（毫米）
+MIN_X_MM = 85486.0   # X 轴最小值
+MAX_X_MM = 200000.0  # X 轴最大值（可根据实际情况调整）
+
+# Y 轴限制（毫米）
+MIN_Y_MM = -100000.0 # Y 轴最小值（可根据实际情况调整）
+MAX_Y_MM = 100000.0  # Y 轴最大值（可根据实际情况调整）
+
+# Z 轴限制（毫米）
+MIN_Z_MM = 113787.0  # Z 轴最小值
+MAX_Z_MM = 300000.0  # Z 轴最大值（可根据实际情况调整）
 
 # ============================================
 # 📌 配置区域结束
@@ -83,7 +97,7 @@ class PiperRobot:
                 self.piper.GripperCtrl(0, 1000, 0x01, 0)
                 # 多次调用确保模式切换成功
                 for _ in range(3):
-                    self.piper.ModeCtrl(0x01, 0x01, 50, 0x00)
+                    self.piper.ModeCtrl(0x01, 0x01, 30, 0x00)
                     self.piper.EnableArm(7, 0x02)
                     time.sleep(0.05)
                 # 清除所有关节错误并配置加速度
@@ -129,8 +143,9 @@ class PiperRobot:
         # 机械臂卡住检测和限制检测
         self.last_joint_pos = None
         self.stuck_counter = 0
-        self.z_limit_triggered = False  # Z轴限制是否被触发
-        self.stuck_threshold = 5  # 连续多少步认为卡住
+        self.safe_joint_pos = None  # 上一个安全的关节位置
+        self.position_limit_violated = False  # 位置限制是否被触发
+        self.stuck_threshold = 15  # 连续多少步认为卡住（已放宽）
         
         # AprilTag 初始化
         self.apriltag_detector = None
@@ -273,21 +288,22 @@ class PiperRobot:
         if gripper_pos is not None:
             self.gripper_pos = gripper_pos
         
-        # 重置Z轴限制触发标志
-        self.z_limit_triggered = False
+        # 重置位置限制触发标志
+        self.position_limit_violated = False
         
         if not self.use_sim and self.piper is not None:
             try:
                 spd = speed if speed is not None else 100
                 
-                # 关节角度限制（单位：弧度）
+                # 关节角度限制（单位：弧度）- 已放宽以允许更多探索
+                # 注意：这些限制仍然在 SDK 安全范围内
                 joint_limits = [
-                    (-2.6179, 2.6179),  # Joint 1: [-150°, 150°]
-                    (0, 3.14),          # Joint 2: [0°, 180°]
-                    (-2.967, 0),        # Joint 3: [-170°, 0°]
-                    (-1.745, 1.745),    # Joint 4: [-100°, 100°]
-                    (-1.22, 1.22),      # Joint 5: [-70°, 70°]
-                    (-2.09439, 2.09439) # Joint 6: [-120°, 120°]
+                    (-2.6179, 2.6179),  # Joint 1: [-150°, 150°] (SDK 限制)
+                    (-0.1745, 3.14),    # Joint 2: [-10° 到 180°] (原 0° 到 180°，向下扩展 10°)
+                    (-3.1416, 0.1745),  # Joint 3: [-180° 到 10°] (原 -170° 到 0°，向下扩展 10°)
+                    (-1.745, 1.745),    # Joint 4: [-100° 到 100°] (保持 SDK 限制)
+                    (-1.22, 1.22),      # Joint 5: [-70° 到 70°] (保持 SDK 限制)
+                    (-2.09439, 2.09439) # Joint 6: [-120° 到 120°] (保持 SDK 限制)
                 ]
                 
                 # 限制关节角度在安全范围内
@@ -320,14 +336,48 @@ class PiperRobot:
                 # 等待移动完成
                 time.sleep(0.1)
                 
-                # 检查 Z 轴高度是否低于最低限制
-                end_pose = self.piper.GetArmEndPoseMsgs()
-                current_z_mm = end_pose.end_pose.Z_axis
-                if current_z_mm < MIN_Z_HEIGHT_MM:
-                    if self.debug_mode:
-                        print(f"[DEBUG] Z 轴高度 {current_z_mm} mm 低于最低限制 {MIN_Z_HEIGHT_MM} mm")
-                    # 标记Z轴限制被触发，但不强制回退（避免死机）
-                    self.z_limit_triggered = True
+                # 如果启用了位置限制，检查末端位置
+                if ENABLE_POSITION_LIMITS and self.safe_joint_pos is not None:
+                    end_pose = self.piper.GetArmEndPoseMsgs()
+                    current_x_mm = end_pose.end_pose.X_axis
+                    current_y_mm = end_pose.end_pose.Y_axis
+                    current_z_mm = end_pose.end_pose.Z_axis
+                    
+                    # 检查是否违反任何限制
+                    x_violated = current_x_mm < MIN_X_MM or current_x_mm > MAX_X_MM
+                    y_violated = current_y_mm < MIN_Y_MM or current_y_mm > MAX_Y_MM
+                    z_violated = current_z_mm < MIN_Z_MM or current_z_mm > MAX_Z_MM
+                    
+                    if x_violated or y_violated or z_violated:
+                        # 违反了限制，回退到上一个安全位置
+                        self.position_limit_violated = True
+                        if self.debug_mode:
+                            if x_violated:
+                                print(f"[DEBUG] X 轴位置 {current_x_mm} mm 超出限制 [{MIN_X_MM}, {MAX_X_MM}]")
+                            if y_violated:
+                                print(f"[DEBUG] Y 轴位置 {current_y_mm} mm 超出限制 [{MIN_Y_MM}, {MAX_Y_MM}]")
+                            if z_violated:
+                                print(f"[DEBUG] Z 轴位置 {current_z_mm} mm 超出限制 [{MIN_Z_MM}, {MAX_Z_MM}]")
+                            print(f"[DEBUG] 违反限制，回退到上一个安全位置")
+                        
+                        # 回退到上一个安全位置
+                        safe_joint_0 = round(self.safe_joint_pos[0] * self.factor)
+                        safe_joint_1 = round(self.safe_joint_pos[1] * self.factor)
+                        safe_joint_2 = round(self.safe_joint_pos[2] * self.factor)
+                        safe_joint_3 = round(self.safe_joint_pos[3] * self.factor)
+                        safe_joint_4 = round(self.safe_joint_pos[4] * self.factor)
+                        safe_joint_5 = round(self.safe_joint_pos[5] * self.factor)
+                        
+                        self.piper.JointCtrl(safe_joint_0, safe_joint_1, safe_joint_2, 
+                                            safe_joint_3, safe_joint_4, safe_joint_5)
+                        time.sleep(0.2)
+                    else:
+                        # 没有违反限制，更新安全位置
+                        self.position_limit_violated = False
+                        self.safe_joint_pos = joint_pos_clipped.copy()
+                else:
+                    # 没有启用限制，或者是第一次移动，更新安全位置
+                    self.safe_joint_pos = joint_pos_clipped.copy()
                 
                 # 获取机械臂状态用于调试（仅在debug_mode下）
                 if self.debug_mode:
@@ -477,7 +527,8 @@ class PiperRobot:
         # 重置卡住检测和限制检测状态
         self.last_joint_pos = None
         self.stuck_counter = 0
-        self.z_limit_triggered = False
+        self.safe_joint_pos = np.array(INITIAL_JOINT_POS).copy()
+        self.position_limit_violated = False
         
         if not hasattr(self, '_initial_obj_pos'):
             self._initial_obj_pos = self.obj_pos.copy()
@@ -488,7 +539,7 @@ class PiperRobot:
         
         if not self.use_sim and self.piper is not None:
             # 使用配置的初始关节位置
-            self.set_joint_pos(INITIAL_JOINT_POS, gripper_pos=0, speed=50)
+            self.set_joint_pos(INITIAL_JOINT_POS, gripper_pos=0, speed=30)
             time.sleep(1.0)
         else:
             self.current_joint_pos = np.array(INITIAL_JOINT_POS).copy()
@@ -504,7 +555,7 @@ class PiperRobot:
         
         # 计算关节位置变化
         joint_change = np.linalg.norm(self.current_joint_pos - self.last_joint_pos)
-        if joint_change < 0.001:  # 关节位置几乎没有变化
+        if joint_change < 0.0001:  # 关节位置几乎没有变化（阈值已放宽10倍）
             self.stuck_counter += 1
         else:
             self.stuck_counter = 0

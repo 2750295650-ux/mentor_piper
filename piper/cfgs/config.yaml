@@ -2,7 +2,7 @@
 frame_stack: 3
 action_repeat: 2
 discount: 0.997
-num_seed_frames: 4000
+num_seed_frames: 8000  # 增加随机种子帧数（原 4000）
 update_every_steps: 2
 eval_every_frames: 10000
 num_eval_episodes: 10
@@ -55,8 +55,9 @@ nstep_alpha_temp: 1000000
 discount_alpha_temp: 500000
 discount_beta_temp: 1600000
 
-# stddev schedule
-stddev_schedule: linear(1.0,0.1,500000)
+# stddev schedule - 增加探索性，避免动作过于相似
+# 初始 stddev 更大，衰减更慢，最终 stddev 更大
+stddev_schedule: linear(1.5,0.3,1000000)
 
 # mentor
 nstep_alpha: 7
@@ -84,12 +85,12 @@ agent:
   max_perturb_factor: 0.95
   perturb_rate: 2
   use_tb: ${use_tb}
-  num_expl_steps: 2000
+  num_expl_steps: 5000  # 增加探索步数（原 2000）
   hidden_dim: 1024
   feature_dim: ${feature_dim}
   stddev_type: awake
   stddev_schedule: ${stddev_schedule}
-  stddev_clip: 0.3
+  stddev_clip: 0.5  # 增加最大探索范围（原 0.3）
   expectile: 0.9
   lr_actor_ratio: 1
   aux_loss_scale_warmup: -1
