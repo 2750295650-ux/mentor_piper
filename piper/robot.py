@@ -103,7 +103,23 @@ class PiperRobot:
                 # 清除所有关节错误并配置加速度
                 self.piper.JointConfig(7, 0x00, 0x00, 500, 0xAE)
                 time.sleep(0.1)
-                print("✓ 机械臂连接成功")
+                
+                # 使用 SDK 原生功能设置关节限制（更可靠）
+                # 设置 Joint 1: [-150°, 150°] = [-2.6179, 2.6179] rad
+                self.piper.SetSDKJointLimitParam("j1", -2.6179, 2.6179)
+                # 设置 Joint 2: [-10°, 180°] = [-0.1745, 3.14] rad
+                self.piper.SetSDKJointLimitParam("j2", -0.1745, 3.14)
+                # 设置 Joint 3: [-180°, 10°] = [-3.1416, 0.1745] rad
+                self.piper.SetSDKJointLimitParam("j3", -3.1416, 0.1745)
+                # 设置 Joint 4: [-100°, 100°] = [-1.745, 1.745] rad
+                self.piper.SetSDKJointLimitParam("j4", -1.745, 1.745)
+                # 设置 Joint 5: [-70°, 70°] = [-1.22, 1.22] rad
+                self.piper.SetSDKJointLimitParam("j5", -1.22, 1.22)
+                # 设置 Joint 6: [-120°, 120°] = [-2.09439, 2.09439] rad
+                self.piper.SetSDKJointLimitParam("j6", -2.09439, 2.09439)
+                time.sleep(0.05)
+                
+                print("✓ 机械臂连接成功，关节限制已设置")
             except Exception as e:
                 print(f"警告：无法连接机械臂：{e}，将使用模拟模式")
                 import traceback
@@ -144,6 +160,7 @@ class PiperRobot:
         self.last_joint_pos = None
         self.stuck_counter = 0
         self.safe_joint_pos = None  # 上一个安全的关节位置
+        self.last_valid_joint_pos = None  # 最后一个有效的关节位置（用于限制变化量）
         self.position_limit_violated = False  # 位置限制是否被触发
         self.stuck_threshold = 15  # 连续多少步认为卡住（已放宽）
         
@@ -295,8 +312,8 @@ class PiperRobot:
             try:
                 spd = speed if speed is not None else 100
                 
-                # 关节角度限制（单位：弧度）- 已放宽以允许更多探索
-                # 注意：这些限制仍然在 SDK 安全范围内
+                # 关节角度限制（单位：弧度）- 已在 SDK 初始化时设置
+                # SDK 会自动限制关节角度，这里只需要检查变化量
                 joint_limits = [
                     (-2.6179, 2.6179),  # Joint 1: [-150°, 150°] (SDK 限制)
                     (-0.1745, 3.14),    # Joint 2: [-10° 到 180°] (原 0° 到 180°，向下扩展 10°)
@@ -306,10 +323,28 @@ class PiperRobot:
                     (-2.09439, 2.09439) # Joint 6: [-120° 到 120°] (保持 SDK 限制)
                 ]
                 
-                # 限制关节角度在安全范围内
+                # 限制关节角度在安全范围内（双重保护）
                 joint_pos_clipped = np.clip(joint_pos, 
                                             [lim[0] for lim in joint_limits],
                                             [lim[1] for lim in joint_limits])
+                
+                # 安全检查：如果关节角度被裁剪，说明 RL 发出了危险指令
+                if np.any(np.abs(joint_pos_clipped - joint_pos) > 0.01):
+                    if self.debug_mode:
+                        print(f"[安全警告] 关节角度超出限制，已自动裁剪")
+                        print(f"  原始：{joint_pos}")
+                        print(f"  裁剪：{joint_pos_clipped}")
+                
+                # 检查关节变化量，避免突变导致 CAN 通信问题
+                if self.last_valid_joint_pos is not None:
+                    delta = np.abs(joint_pos_clipped - self.last_valid_joint_pos)
+                    max_delta = np.max(delta)
+                    if max_delta > 0.5:  # 单次移动不超过 0.5 弧度（约 28.6 度）
+                        if self.debug_mode:
+                            print(f"[安全警告] 关节变化量过大 ({max_delta:.3f} rad)，限制在 0.5 rad 以内")
+                        # 限制最大变化量
+                        scale = 0.5 / max_delta
+                        joint_pos_clipped = self.last_valid_joint_pos + (joint_pos_clipped - self.last_valid_joint_pos) * scale
                 
                 joint_0 = round(joint_pos_clipped[0] * self.factor)
                 joint_1 = round(joint_pos_clipped[1] * self.factor)
@@ -324,62 +359,91 @@ class PiperRobot:
                     print(f"[DEBUG] joint_0-5: {joint_0}, {joint_1}, {joint_2}, {joint_3}, {joint_4}, {joint_5}")
                     print(f"[DEBUG] gripper_cmd: {gripper_cmd}")
                 
+                # 如果启用了位置限制，在发送指令前先预测末端位置
+                use_safe_pos = False
+                if ENABLE_POSITION_LIMITS and self.safe_joint_pos is not None:
+                    # 使用 SDK 的正向运动学预测末端位置
+                    fk_result = self.piper.GetFK(mode="control")
+                    
+                    if fk_result:
+                        # 预测的末端位置（毫米）
+                        predicted_x = fk_result.X_axis
+                        predicted_y = fk_result.Y_axis
+                        predicted_z = fk_result.Z_axis
+                        
+                        # 检查预测位置是否超出限制
+                        x_violated = predicted_x < MIN_X_MM or predicted_x > MAX_X_MM
+                        y_violated = predicted_y < MIN_Y_MM or predicted_y > MAX_Y_MM
+                        z_violated = predicted_z < MIN_Z_MM or predicted_z > MAX_Z_MM
+                        
+                        if x_violated or y_violated or z_violated:
+                            # 预测位置超出限制，拒绝执行该指令
+                            self.position_limit_violated = True
+                            if self.debug_mode:
+                                print(f"[安全拦截] 预测位置超出限制，拒绝执行")
+                                print(f"  预测位置：X={predicted_x:.1f}, Y={predicted_y:.1f}, Z={predicted_z:.1f}")
+                                if x_violated:
+                                    print(f"  X 轴限制：[{MIN_X_MM}, {MAX_X_MM}]")
+                                if y_violated:
+                                    print(f"  Y 轴限制：[{MIN_Y_MM}, {MAX_Y_MM}]")
+                                if z_violated:
+                                    print(f"  Z 轴限制：[{MIN_Z_MM}, {MAX_Z_MM}]")
+                                print(f"  使用上一个安全位置")
+                            
+                            use_safe_pos = True
+                        else:
+                            # 预测位置安全，更新安全位置
+                            self.position_limit_violated = False
+                            self.safe_joint_pos = joint_pos_clipped.copy()
+                    else:
+                        if self.debug_mode:
+                            print(f"[警告] 正向运动学计算失败，使用安全位置")
+                        # FK 计算失败，使用安全位置
+                        use_safe_pos = True
+                
+                # 如果需要使用安全位置
+                if use_safe_pos and self.safe_joint_pos is not None:
+                    joint_0 = round(self.safe_joint_pos[0] * self.factor)
+                    joint_1 = round(self.safe_joint_pos[1] * self.factor)
+                    joint_2 = round(self.safe_joint_pos[2] * self.factor)
+                    joint_3 = round(self.safe_joint_pos[3] * self.factor)
+                    joint_4 = round(self.safe_joint_pos[4] * self.factor)
+                    joint_5 = round(self.safe_joint_pos[5] * self.factor)
+                
                 # 确保机械臂处于 CAN 命令控制模式并使能电机
                 self.piper.ModeCtrl(0x01, 0x01, spd, 0x00)
                 self.piper.EnableArm(7, 0x02)
                 # 清除错误并确保电机准备好
                 self.piper.JointConfig(7, 0x00, 0x00, 500, 0xAE)
                 time.sleep(0.01)  # 等待命令生效
-                self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
-                self.piper.GripperCtrl(gripper_cmd, 1000, 0x01, 0)
+                
+                # 发送关节指令（带重试机制）
+                max_retries = 2
+                for attempt in range(max_retries):
+                    try:
+                        self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
+                        self.piper.GripperCtrl(gripper_cmd, 1000, 0x01, 0)
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            if self.debug_mode:
+                                print(f"[CAN 重试] 第{attempt+1}次发送失败：{e}，重试中...")
+                            time.sleep(0.02)
+                        else:
+                            print(f"[CAN 错误] 关节指令发送失败：{e}")
+                            raise
                 
                 # 等待移动完成
                 time.sleep(0.1)
                 
-                # 如果启用了位置限制，检查末端位置
-                if ENABLE_POSITION_LIMITS and self.safe_joint_pos is not None:
-                    end_pose = self.piper.GetArmEndPoseMsgs()
-                    current_x_mm = end_pose.end_pose.X_axis
-                    current_y_mm = end_pose.end_pose.Y_axis
-                    current_z_mm = end_pose.end_pose.Z_axis
-                    
-                    # 检查是否违反任何限制
-                    x_violated = current_x_mm < MIN_X_MM or current_x_mm > MAX_X_MM
-                    y_violated = current_y_mm < MIN_Y_MM or current_y_mm > MAX_Y_MM
-                    z_violated = current_z_mm < MIN_Z_MM or current_z_mm > MAX_Z_MM
-                    
-                    if x_violated or y_violated or z_violated:
-                        # 违反了限制，回退到上一个安全位置
-                        self.position_limit_violated = True
-                        if self.debug_mode:
-                            if x_violated:
-                                print(f"[DEBUG] X 轴位置 {current_x_mm} mm 超出限制 [{MIN_X_MM}, {MAX_X_MM}]")
-                            if y_violated:
-                                print(f"[DEBUG] Y 轴位置 {current_y_mm} mm 超出限制 [{MIN_Y_MM}, {MAX_Y_MM}]")
-                            if z_violated:
-                                print(f"[DEBUG] Z 轴位置 {current_z_mm} mm 超出限制 [{MIN_Z_MM}, {MAX_Z_MM}]")
-                            print(f"[DEBUG] 违反限制，回退到上一个安全位置")
-                        
-                        # 回退到上一个安全位置
-                        safe_joint_0 = round(self.safe_joint_pos[0] * self.factor)
-                        safe_joint_1 = round(self.safe_joint_pos[1] * self.factor)
-                        safe_joint_2 = round(self.safe_joint_pos[2] * self.factor)
-                        safe_joint_3 = round(self.safe_joint_pos[3] * self.factor)
-                        safe_joint_4 = round(self.safe_joint_pos[4] * self.factor)
-                        safe_joint_5 = round(self.safe_joint_pos[5] * self.factor)
-                        
-                        self.piper.JointCtrl(safe_joint_0, safe_joint_1, safe_joint_2, 
-                                            safe_joint_3, safe_joint_4, safe_joint_5)
-                        time.sleep(0.2)
-                    else:
-                        # 没有违反限制，更新安全位置
-                        self.position_limit_violated = False
-                        self.safe_joint_pos = joint_pos_clipped.copy()
+                # 更新最后有效的关节位置
+                if not use_safe_pos:
+                    self.last_valid_joint_pos = joint_pos_clipped.copy()
                 else:
                     # 没有启用限制，或者是第一次移动，更新安全位置
                     self.safe_joint_pos = joint_pos_clipped.copy()
                 
-                # 获取机械臂状态用于调试（仅在debug_mode下）
+                # 获取机械臂状态用于调试（仅在 debug_mode 下）
                 if self.debug_mode:
                     arm_status = self.piper.GetArmStatus()
                     print(f"[DEBUG] Arm Status: {arm_status}")
@@ -528,6 +592,7 @@ class PiperRobot:
         self.last_joint_pos = None
         self.stuck_counter = 0
         self.safe_joint_pos = np.array(INITIAL_JOINT_POS).copy()
+        self.last_valid_joint_pos = np.array(INITIAL_JOINT_POS).copy()  # 初始化最后有效位置
         self.position_limit_violated = False
         
         if not hasattr(self, '_initial_obj_pos'):
