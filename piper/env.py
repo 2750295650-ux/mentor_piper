@@ -97,7 +97,8 @@ class PiperEnv:
     def __init__(self, task_name, seed=None, action_repeat=1, 
                  size=(256, 256), use_sim=True, visualize=False,
                  obj_pos=None, goal_pos=None, print_reward=True,
-                 debug_mode=False, use_apriltag=False, tag_size=0.05):
+                 debug_mode=False, use_apriltag=False, tag_size=0.05,
+                 enable_spacemouse=False, spacemouse_scale=0.05):
         self.task_name = task_name
         self._size = size
         self._action_repeat = action_repeat
@@ -132,6 +133,20 @@ class PiperEnv:
         self._episode_reward = 0.0
         self._window_name = "Piper Training Camera"
         self._manual_reward = 0.0  # 手动奖励
+        
+        # 初始化 SpaceMouse 控制器（可选）
+        self._spacemouse_enabled = enable_spacemouse
+        self._spacemouse_controller = None
+        if self._spacemouse_enabled:
+            try:
+                from piper.spacemouse_controller import PiperSpaceMouseController
+                self._spacemouse_controller = PiperSpaceMouseController(
+                    scale_factor=spacemouse_scale
+                )
+                print("✓ SpaceMouse 已启用")
+            except Exception as e:
+                print(f"⚠️ SpaceMouse 初始化失败: {e}")
+                self._spacemouse_enabled = False
     
     def _visualize_frame(self, obs, reward, success, step_count, obj_to_target=None, episode_reward=None):
         if not self._visualize:
@@ -354,6 +369,15 @@ class PiperEnv:
     
     def step(self, action):
         assert np.isfinite(action["action"]).all(), action["action"]
+        
+        # 检查是否有 SpaceMouse 人工干预
+        spacemouse_action = None
+        if self._spacemouse_enabled and self._spacemouse_controller is not None:
+            spacemouse_action, is_active = self._spacemouse_controller.get_action()
+            if is_active:
+                # 有 SpaceMouse 输入时，使用人工控制
+                action["action"] = spacemouse_action
+        
         total_reward = 0.0
         success = 0.0
         obj_to_target = 0.0
@@ -389,12 +413,17 @@ class PiperEnv:
             if hasattr(self.robot, 'stuck_counter') and self.robot.stuck_counter > 0:
                 limit_info += f" | Stuck: {self.robot.stuck_counter}"
             
+            # 添加 SpaceMouse 干预信息
+            spacemouse_info = ""
+            if spacemouse_action is not None and np.any(np.abs(spacemouse_action) > 0.001):
+                spacemouse_info = " | 🖱️ SpaceMouse"
+            
             print(f"[Step {self.step_count:3d}] "
                   f"Reward: {total_reward:6.2f} | "
                   f"Episode Reward: {self._episode_reward:6.2f} | "
                   f"Obj->Target: {obj_to_target:.4f}m | "
                   f"Success: {'✅' if success else '❌'}"
-                  f"{apriltag_info}{limit_info}")
+                  f"{apriltag_info}{limit_info}{spacemouse_info}")
         
         self._visualize_frame(obs, total_reward, bool(success), self.step_count, 
                              obj_to_target, self._episode_reward)
@@ -417,6 +446,9 @@ class PiperEnv:
                 cv2.destroyAllWindows()
         except:
             pass
+        # 关闭 SpaceMouse
+        if self._spacemouse_controller is not None:
+            self._spacemouse_controller.close()
         self.robot.close()
 
 
